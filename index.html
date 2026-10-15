@@ -1375,7 +1375,7 @@ function updateCompleteButton() {
   const done = todayExercises.filter(e => e.completed).length;
   const total = todayExercises.length;
   btn.textContent = `Complete Workout (${done}/${total})`;
-  btn.disabled = done === 0;
+  btn.disabled = done < total;
 }
 
 // ============================================================
