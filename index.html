@@ -783,6 +783,9 @@ header h1 { font-size: 1.1rem; font-weight: 700; }
   <div class="tab-content" id="tab-history">
     <h3 style="margin-bottom:12px;color:var(--gray-700)">Workout History</h3>
     <div id="history-list"></div>
+    <div style="margin-top:24px;text-align:center">
+      <button class="btn btn-outline btn-sm" id="reset-btn" onclick="resetProgress()">Reset progress</button>
+    </div>
   </div>
 </div>
 </div>
@@ -1190,6 +1193,7 @@ function getAnimationSVG(type) {
 // ============================================================
 let currentUser = null;
 let startDate = null;
+let currentDay = 1; // advances only when a full workout is completed
 let todayExercises = [];
 let timerInterval = null;
 let timerSeconds = 30;
@@ -1248,23 +1252,33 @@ async function initApp() {
   renderWeekDots();
 }
 
+function settingsRef() {
+  return db.collection('users').doc(currentUser.uid).collection('profile').doc('settings');
+}
+
 async function loadProfile() {
   if (!db || !currentUser) return;
-  const doc = await db.collection('users').doc(currentUser.uid).collection('profile').doc('settings').get();
-  if (doc.exists) {
-    startDate = doc.data().startDate?.toDate?.() || new Date(doc.data().startDate);
-  } else {
-    startDate = new Date();
-    await db.collection('users').doc(currentUser.uid).collection('profile').doc('settings').set({
-      startDate: firebase.firestore.Timestamp.fromDate(startDate)
-    });
+  const doc = await settingsRef().get();
+  if (doc.exists && typeof doc.data().currentDay === 'number') {
+    currentDay = doc.data().currentDay;
+    return;
   }
+  // First run, or an account from before the manual counter existed:
+  // start from the number of fully completed workouts so existing progress is kept.
+  let done = 0;
+  try {
+    const snap = await db.collection('users').doc(currentUser.uid).collection('workouts').get();
+    snap.docs.forEach(d => {
+      const w = d.data();
+      if (w.totalExercises && w.exercisesCompleted === w.totalExercises) done++;
+    });
+  } catch (e) { console.error('Profile migration error:', e); }
+  currentDay = done + 1;
+  await settingsRef().set({ currentDay }, { merge: true });
 }
 
 function getDay() {
-  if (!startDate) return 1;
-  const diff = Math.floor((new Date() - startDate) / (1000 * 60 * 60 * 24));
-  return Math.max(1, diff + 1);
+  return currentDay;
 }
 
 function getPhase() {
@@ -1282,8 +1296,9 @@ function renderWorkout() {
 
   document.getElementById('phase-badge').textContent =
     phase === 1 ? 'Weeks 1-2: Foundation' : 'Weeks 3-4: Progression';
-  document.getElementById('day-info').textContent =
-    `Day ${Math.min(day, 28)} of 28 \u2022 ${new Date().toLocaleDateString('en-US', {weekday: 'long', month: 'short', day: 'numeric'})}`;
+  document.getElementById('day-info').textContent = day > 28
+    ? 'Program complete (28 of 28)'
+    : `Day ${day} of 28 \u2022 ${new Date().toLocaleDateString('en-US', {weekday: 'long', month: 'short', day: 'numeric'})}`;
 
   todayExercises = exercises.map(ex => ({
     ...ex,
@@ -1417,6 +1432,7 @@ async function completeWorkout() {
     alert('Not connected to Firebase. Please set up your config.');
     return;
   }
+  const finished = todayExercises.every(e => e.completed);
   const data = {
     exercises: todayExercises.map(ex => ({
       name: ex.name,
@@ -1425,14 +1441,32 @@ async function completeWorkout() {
     })),
     completedAt: firebase.firestore.FieldValue.serverTimestamp(),
     phase: getPhase(),
+    day: currentDay,
     exercisesCompleted: todayExercises.filter(e => e.completed).length,
     totalExercises: todayExercises.length
   };
 
   try {
-    await db.collection('users').doc(currentUser.uid)
-      .collection('workouts').doc(todayKey()).set(data);
-    alert('Workout saved!');
+    const workouts = db.collection('users').doc(currentUser.uid).collection('workouts');
+    // Keep one doc per day number: if today's doc belongs to a different program day
+    // (e.g. two workouts on the same date), save under a suffixed id instead of overwriting.
+    let id = todayKey();
+    const existing = await workouts.doc(id).get();
+    if (existing.exists && existing.data().day !== undefined && existing.data().day !== currentDay) {
+      id = `${todayKey()}_d${currentDay}`;
+    }
+    await workouts.doc(id).set(data);
+
+    if (finished && currentDay <= 28) {
+      currentDay += 1;
+      await settingsRef().set({ currentDay }, { merge: true });
+      alert('Workout complete! Moving on to the next day.');
+      renderWorkout(); // fresh, unchecked list for the new day
+    } else if (!finished) {
+      alert('Progress saved. Finish every exercise to advance to the next day.');
+    } else {
+      alert('Workout saved!');
+    }
     loadHistory();
     renderWeekDots();
   } catch(e) {
@@ -1446,7 +1480,8 @@ async function loadTodayWorkout() {
   try {
     const doc = await db.collection('users').doc(currentUser.uid)
       .collection('workouts').doc(todayKey()).get();
-    if (doc.exists) {
+    // Only restore today's saved ticks if they belong to the day you're currently on
+    if (doc.exists && (doc.data().day === undefined || doc.data().day === currentDay)) {
       const data = doc.data();
       data.exercises.forEach((saved, i) => {
         if (i < todayExercises.length) {
@@ -1458,6 +1493,49 @@ async function loadTodayWorkout() {
     }
   } catch(e) {
     console.error('Load error:', e);
+  }
+}
+
+async function deleteCollection(name) {
+  const col = db.collection('users').doc(currentUser.uid).collection(name);
+  const snap = await col.get();
+  for (let i = 0; i < snap.docs.length; i += 400) {
+    const batch = db.batch();
+    snap.docs.slice(i, i + 400).forEach(d => batch.delete(d.ref));
+    await batch.commit();
+  }
+}
+
+async function resetProgress() {
+  if (!db || !currentUser) {
+    alert('Not connected to Firebase.');
+    return;
+  }
+  if (!confirm('Reset your program back to Day 1? This permanently deletes your workout history.')) return;
+  const alsoMeasurements = confirm('Also delete your saved measurements (thigh, balance, pain, etc.)?\n\nOK = delete them too\nCancel = keep measurements');
+
+  const btn = document.getElementById('reset-btn');
+  btn.disabled = true;
+  try {
+    await deleteCollection('workouts');
+    if (alsoMeasurements) await deleteCollection('measurements');
+    currentDay = 1;
+    await settingsRef().set({ currentDay: 1 }, { merge: true });
+
+    if (alsoMeasurements) {
+      Object.values(charts).forEach(c => c && c.destroy && c.destroy());
+      charts = {};
+    }
+    renderWorkout();
+    loadHistory();
+    renderWeekDots();
+    if (alsoMeasurements) loadMeasurements();
+    alert('Progress reset. You are back at Day 1.');
+  } catch (e) {
+    console.error('Reset error:', e);
+    alert('Reset failed: ' + e.message);
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -1478,12 +1556,12 @@ async function loadHistory() {
 
     list.innerHTML = snap.docs.map(doc => {
       const d = doc.data();
-      const date = doc.id;
+      const date = doc.id.slice(0, 10);
       const dateObj = new Date(date + 'T12:00:00');
       const formatted = dateObj.toLocaleDateString('en-US', {weekday: 'short', month: 'short', day: 'numeric'});
       return `<div class="history-item">
         <div>
-          <div class="history-date">${formatted}</div>
+          <div class="history-date">${formatted}${d.day ? ` • Day ${d.day}` : ''}</div>
           <div class="history-count">${d.exercisesCompleted || 0}/${d.totalExercises || 0} exercises</div>
         </div>
         <span class="history-badge">Phase ${d.phase || '?'}</span>
@@ -1638,7 +1716,7 @@ async function renderWeekDots() {
         .where(firebase.firestore.FieldPath.documentId(), '>=', startKey)
         .get();
       snap.docs.forEach(doc => {
-        const dayDate = new Date(doc.id + 'T12:00:00');
+        const dayDate = new Date(doc.id.slice(0, 10) + 'T12:00:00');
         const dayIdx = dayDate.getDay() === 0 ? 6 : dayDate.getDay() - 1;
         completedDays.add(dayIdx);
       });
