@@ -15,7 +15,8 @@ Live app: https://and.github.io/exercise/
 - **Rest timer** that starts when you finish a set (pause, skip, or add 15 seconds).
 - **Manual day progression:** the day only advances when you complete a workout. It never advances just because the calendar day changes.
 - **Complete Workout is locked** until every exercise for the day is done. The button shows your count, for example `Complete Workout (2/8)`.
-- **Go back or restart from an earlier day:** use *Previous day*, or *Restart from day...* to pick any earlier day. Workouts logged for that day onward are deleted so you can redo them. Measurements are kept.
+- **Look back without losing anything:** *Previous day* and *Next day* let you view any earlier day's workout, read-only, with what you logged that day. Your progress is never changed by browsing.
+- **Explicit resume:** when viewing an earlier day, *Resume from this day* makes it your current day again. This resets progress: workouts logged for that day onward are deleted. Measurements are kept.
 - **Progress tab:** workouts this week and measurement charts (thigh circumference, balance and wall sit, pain and knee confidence).
 - **History tab:** past workouts, plus a **Reset progress** button that returns you to Day 1 (with the option to also delete measurements).
 
@@ -25,7 +26,8 @@ Live app: https://and.github.io/exercise/
 | --- | --- |
 | Tick exercises | Kept on the page only. They reset if you reload before finishing. |
 | Complete Workout (all exercises done) | Saves the workout and moves to the next day. |
-| Previous day / Restart from day N | Deletes workouts for day N onward and sets the current day to N. |
+| Previous day / Next day | Read-only view of that day. No data changes. |
+| Resume from this day (day N) | Deletes workouts for day N onward and sets the current day to N, after a confirmation. |
 | Reset progress | Deletes all workout history and returns to Day 1. |
 
 The current day is stored in Firestore at `users/<uid>/profile/settings` as `currentDay`.

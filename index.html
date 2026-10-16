@@ -171,16 +171,11 @@ header h1 { font-size: 1.1rem; font-weight: 700; }
   gap: 8px;
   margin: -6px 0 16px;
 }
-.day-controls .btn:disabled, .day-select:disabled { opacity: .5; cursor: not-allowed; }
-.day-select {
-  padding: 6px 10px;
-  border: 2px solid var(--gray-200);
-  border-radius: 8px;
-  background: white;
-  color: var(--gray-600);
-  font-size: .8rem;
-  font-weight: 600;
-}
+.day-controls .btn:disabled { opacity: .5; cursor: not-allowed; }
+.review-bar { display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; }
+.review-bar p { margin: 0; color: var(--gray-600); font-size: .9rem; }
+.review-bar .review-hint { color: var(--gray-500); font-size: .75rem; max-width: 320px; }
+.exercise-card.readonly .exercise-checkbox, .exercise-card.readonly .set-btn { cursor: default; pointer-events: none; }
 
 /* Exercise Card */
 .exercise-card {
@@ -727,14 +722,20 @@ header h1 { font-size: 1.1rem; font-weight: 700; }
     <div class="phase-badge" id="phase-badge">Week 1-2: Foundation</div>
     <div class="day-info" id="day-info">Day 1 of 28</div>
     <div class="day-controls">
-      <button class="btn btn-outline btn-sm" id="prev-day-btn" onclick="goToDay(currentDay - 1)">&larr; Previous day</button>
-      <select class="day-select" id="restart-day" onchange="onRestartDayChange(this)" aria-label="Restart from an earlier day"></select>
+      <button class="btn btn-outline btn-sm" id="prev-day-btn" onclick="stepDay(-1)">&larr; Previous day</button>
+      <button class="btn btn-outline btn-sm" id="next-day-btn" onclick="stepDay(1)">Next day &rarr;</button>
     </div>
     <div id="exercise-list"></div>
     <div class="complete-section">
       <button class="btn btn-success btn-lg" id="complete-btn" onclick="completeWorkout()">
         Complete Workout
       </button>
+      <div id="review-bar" class="review-bar" style="display:none">
+        <p id="review-note"></p>
+        <button class="btn btn-primary" id="back-to-current-btn" onclick="stepDay(Infinity)">Back to current day</button>
+        <button class="btn btn-outline" id="resume-btn" onclick="resumeFromViewedDay()">Resume from this day</button>
+        <p class="review-hint">Resuming deletes the workouts logged for this day onward so you can redo them. Measurements are kept.</p>
+      </div>
     </div>
   </div>
 
@@ -1310,16 +1311,41 @@ function getPhase() {
 // ============================================================
 // WORKOUT RENDERING
 // ============================================================
+// The day being looked at. null means "the current day". A smaller number is a
+// read-only view of an earlier day; it never changes saved progress.
+let viewDay = null;
+
+function shownDay() {
+  return viewDay === null ? currentDay : Math.max(1, Math.min(viewDay, currentDay));
+}
+
+function isReviewing() {
+  return shownDay() < currentDay;
+}
+
+function stepDay(delta) {
+  if (delta === Infinity) {
+    viewDay = null;
+  } else {
+    const target = shownDay() + delta;
+    viewDay = target >= currentDay ? null : Math.max(1, target);
+  }
+  renderWorkout();
+}
+
 function renderWorkout() {
-  const phase = getPhase();
-  const day = getDay();
+  const day = shownDay();
+  const review = isReviewing();
+  const phase = day <= 14 ? 1 : 2;
   const exercises = phase === 1 ? EXERCISES.phase1 : EXERCISES.phase2;
 
   document.getElementById('phase-badge').textContent =
     phase === 1 ? 'Weeks 1-2: Foundation' : 'Weeks 3-4: Progression';
   document.getElementById('day-info').textContent = day > 28
     ? 'Program complete (28 of 28)'
-    : `Day ${day} of 28 \u2022 ${new Date().toLocaleDateString('en-US', {weekday: 'long', month: 'short', day: 'numeric'})}`;
+    : review
+      ? `Day ${day} of 28 \u2022 Viewing (read-only)`
+      : `Day ${day} of 28 \u2022 ${new Date().toLocaleDateString('en-US', {weekday: 'long', month: 'short', day: 'numeric'})}`;
   renderDayControls();
 
   todayExercises = exercises.map(ex => ({
@@ -1329,14 +1355,15 @@ function renderWorkout() {
   }));
 
   renderExerciseList();
+  if (review) loadReviewedDay(day);
 }
 
 function renderExerciseList() {
   const list = document.getElementById('exercise-list');
   list.innerHTML = todayExercises.map((ex, i) => `
-    <div class="exercise-card ${ex.completed ? 'completed' : ''}" id="ex-card-${i}">
+    <div class="exercise-card ${ex.completed ? 'completed' : ''} ${isReviewing() ? 'readonly' : ''}" id="ex-card-${i}">
       <div class="exercise-header" onclick="toggleExercise(${i})">
-        <div class="exercise-checkbox ${ex.completed ? 'checked' : ''}" onclick="event.stopPropagation(); toggleComplete(${i})"></div>
+        <div class="exercise-checkbox ${ex.completed ? 'checked' : ''}" ${isReviewing() ? '' : `onclick="event.stopPropagation(); toggleComplete(${i})"`}></div>
         <span class="exercise-name">${ex.name}</span>
         <span class="exercise-sets">${ex.sets}&times;${ex.reps}</span>
         <span class="exercise-expand" id="ex-expand-${i}">\u25BC</span>
@@ -1345,9 +1372,9 @@ function renderExerciseList() {
         <div class="exercise-cue">${ex.cue}</div>
         <div class="set-tracker">
           ${ex.setsCompleted.map((done, s) =>
-            `<button class="set-btn ${done ? 'done' : ''}" onclick="event.stopPropagation(); toggleSet(${i}, ${s})">S${s+1}</button>`
+            `<button class="set-btn ${done ? 'done' : ''}" ${isReviewing() ? 'tabindex="-1"' : `onclick="event.stopPropagation(); toggleSet(${i}, ${s})"`}>S${s+1}</button>`
           ).join('')}
-          <button class="btn btn-outline btn-sm" onclick="event.stopPropagation(); startTimer()" style="margin-left:auto">Rest</button>
+          ${isReviewing() ? '' : `<button class="btn btn-outline btn-sm" onclick="event.stopPropagation(); startTimer()" style="margin-left:auto">Rest</button>`}
         </div>
         <div class="animation-container">${getAnimationSVG(ex.anim)}</div>
         <button class="video-btn" onclick="event.stopPropagation(); openVideo('${ex.videoId || ''}', '${ex.video}', '${ex.name}')">
@@ -1369,6 +1396,7 @@ function toggleExercise(i) {
 }
 
 function toggleComplete(i) {
+  if (isReviewing()) return;
   todayExercises[i].completed = !todayExercises[i].completed;
   if (todayExercises[i].completed) {
     todayExercises[i].setsCompleted = todayExercises[i].setsCompleted.map(() => true);
@@ -1377,6 +1405,7 @@ function toggleComplete(i) {
 }
 
 function toggleSet(i, s) {
+  if (isReviewing()) return;
   todayExercises[i].setsCompleted[s] = !todayExercises[i].setsCompleted[s];
   // Auto-complete if all sets done
   if (todayExercises[i].setsCompleted.every(v => v)) {
@@ -1394,6 +1423,10 @@ function toggleSet(i, s) {
 
 function updateCompleteButton() {
   const btn = document.getElementById('complete-btn');
+  const review = isReviewing();
+  btn.style.display = review ? 'none' : '';
+  document.getElementById('review-bar').style.display = review ? 'flex' : 'none';
+  if (review) return;
   const done = todayExercises.filter(e => e.completed).length;
   const total = todayExercises.length;
   if (currentDay > 28) {
@@ -1511,60 +1544,89 @@ async function completeWorkout() {
   }
 }
 
-// Go back to an earlier day and restart from there. Workouts logged for that day
-// and every later day are deleted, so progress is reset to that point.
+// Pair every saved workout with its program day. Older entries have no day number:
+// rank the fully completed ones by date (1, 2, ...), which matches how the starting
+// day was derived for existing accounts. Anything else gets Infinity.
+function workoutsWithDays(docs) {
+  const legacyRank = new Map();
+  docs
+    .filter(d => d.data().day === undefined && d.data().totalExercises && d.data().exercisesCompleted === d.data().totalExercises)
+    .sort((a, b) => a.id.localeCompare(b.id))
+    .forEach((d, i) => legacyRank.set(d.id, i + 1));
+  return docs.map(d => {
+    const x = d.data();
+    return { doc: d, day: x.day !== undefined ? x.day : (legacyRank.get(d.id) ?? Infinity) };
+  });
+}
+
+// Fill the read-only view of an earlier day with what was saved for it.
+async function loadReviewedDay(day) {
+  const note = document.getElementById('review-note');
+  note.textContent = `You're viewing Day ${day}. Nothing here changes your progress.`;
+  if (!db || !currentUser) return;
+  try {
+    const snap = await db.collection('users').doc(currentUser.uid).collection('workouts').get();
+    if (shownDay() !== day || !isReviewing()) return; // user navigated away meanwhile
+    const match = workoutsWithDays(snap.docs).find(w => w.day === day);
+    if (!match) {
+      note.textContent = `Day ${day}: no saved record for this day. Nothing here changes your progress.`;
+      return;
+    }
+    const saved = match.doc.data();
+    (saved.exercises || []).forEach((s, i) => {
+      if (i < todayExercises.length) {
+        todayExercises[i].completed = !!s.completed;
+        todayExercises[i].setsCompleted = s.setsCompleted || todayExercises[i].setsCompleted;
+      }
+    });
+    renderExerciseList();
+    note.textContent = `Day ${day} was completed on ${match.doc.id.slice(0, 10)}. Nothing here changes your progress.`;
+  } catch (e) {
+    console.error('Review load error:', e);
+  }
+}
+
+// Explicit reset: make the viewed earlier day the current day again. Workouts logged
+// for that day and every later day are deleted so the journey resumes from there.
+function resumeFromViewedDay() {
+  goToDay(shownDay());
+}
+
 async function goToDay(n) {
   if (!db || !currentUser) {
     alert('Not connected to Firebase.');
     return;
   }
   if (!Number.isInteger(n) || n < 1 || n >= currentDay) return;
-  if (!confirm(`Go back to Day ${n}?\n\nWorkouts logged for Day ${n} onward will be deleted so you can redo them. Measurements are kept.`)) return;
+  if (!confirm(`Resume from Day ${n}?\n\nThis resets your progress: workouts logged for Day ${n} onward will be deleted so you can redo them. Measurements are kept.`)) return;
 
+  const btn = document.getElementById('resume-btn');
+  btn.disabled = true;
   try {
     const snap = await db.collection('users').doc(currentUser.uid).collection('workouts').get();
-    // Older entries have no day number: rank the fully completed ones by date (1, 2, ...),
-    // which matches how the starting day was derived for existing accounts.
-    const legacyRank = new Map();
-    snap.docs
-      .filter(d => d.data().day === undefined && d.data().totalExercises && d.data().exercisesCompleted === d.data().totalExercises)
-      .sort((a, b) => a.id.localeCompare(b.id))
-      .forEach((d, i) => legacyRank.set(d.id, i + 1));
-    const doomed = snap.docs.filter(d => {
-      const x = d.data();
-      const dayOf = x.day !== undefined ? x.day : (legacyRank.get(d.id) ?? Infinity);
-      return dayOf >= n;
-    });
+    const doomed = workoutsWithDays(snap.docs).filter(w => w.day >= n).map(w => w.doc);
     for (let i = 0; i < doomed.length; i += 400) {
       const batch = db.batch();
       doomed.slice(i, i + 400).forEach(d => batch.delete(d.ref));
       await batch.commit();
     }
     currentDay = n;
+    viewDay = null;
     await settingsRef().set({ currentDay }, { merge: true });
     renderWorkout();
     loadHistory();
     renderWeekDots();
   } catch (e) {
-    console.error('Go-to-day error:', e);
-    alert('Could not change day: ' + e.message);
+    console.error('Resume error:', e);
+    alert('Could not resume from that day: ' + e.message);
+  } finally {
+    btn.disabled = false;
   }
 }
 
 function renderDayControls() {
-  const prev = document.getElementById('prev-day-btn');
-  const sel = document.getElementById('restart-day');
-  const last = Math.min(currentDay - 1, 28);
-  prev.disabled = currentDay <= 1;
-  sel.disabled = last < 1;
-  sel.innerHTML = '<option value="">Restart from day…</option>' +
-    Array.from({length: Math.max(last, 0)}, (_, i) => `<option value="${i + 1}">Day ${i + 1}</option>`).join('');
-}
-
-function onRestartDayChange(sel) {
-  const n = parseInt(sel.value, 10);
-  sel.value = '';
-  if (n) goToDay(n);
+  document.getElementById('prev-day-btn').disabled = shownDay() <= 1;
+  document.getElementById('next-day-btn').disabled = !isReviewing();
 }
 
 async function loadTodayWorkout() {
@@ -1573,7 +1635,7 @@ async function loadTodayWorkout() {
     const doc = await db.collection('users').doc(currentUser.uid)
       .collection('workouts').doc(todayKey()).get();
     // Only restore today's saved ticks if they belong to the day you're currently on
-    if (doc.exists && (doc.data().day === undefined || doc.data().day === currentDay)) {
+    if (!isReviewing() && doc.exists && (doc.data().day === undefined || doc.data().day === currentDay)) {
       const data = doc.data();
       data.exercises.forEach((saved, i) => {
         if (i < todayExercises.length) {
@@ -1612,6 +1674,7 @@ async function resetProgress() {
     await deleteCollection('workouts');
     if (alsoMeasurements) await deleteCollection('measurements');
     currentDay = 1;
+    viewDay = null;
     await settingsRef().set({ currentDay: 1 }, { merge: true });
 
     if (alsoMeasurements) {
