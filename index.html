@@ -165,6 +165,23 @@ header h1 { font-size: 1.1rem; font-weight: 700; }
   margin-bottom: 16px;
 }
 
+.day-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: -6px 0 16px;
+}
+.day-controls .btn:disabled, .day-select:disabled { opacity: .5; cursor: not-allowed; }
+.day-select {
+  padding: 6px 10px;
+  border: 2px solid var(--gray-200);
+  border-radius: 8px;
+  background: white;
+  color: var(--gray-600);
+  font-size: .8rem;
+  font-weight: 600;
+}
+
 /* Exercise Card */
 .exercise-card {
   background: white;
@@ -709,6 +726,10 @@ header h1 { font-size: 1.1rem; font-weight: 700; }
   <div class="tab-content active" id="tab-workout">
     <div class="phase-badge" id="phase-badge">Week 1-2: Foundation</div>
     <div class="day-info" id="day-info">Day 1 of 28</div>
+    <div class="day-controls">
+      <button class="btn btn-outline btn-sm" id="prev-day-btn" onclick="goToDay(currentDay - 1)">&larr; Previous day</button>
+      <select class="day-select" id="restart-day" onchange="onRestartDayChange(this)" aria-label="Restart from an earlier day"></select>
+    </div>
     <div id="exercise-list"></div>
     <div class="complete-section">
       <button class="btn btn-success btn-lg" id="complete-btn" onclick="completeWorkout()">
@@ -1299,6 +1320,7 @@ function renderWorkout() {
   document.getElementById('day-info').textContent = day > 28
     ? 'Program complete (28 of 28)'
     : `Day ${day} of 28 \u2022 ${new Date().toLocaleDateString('en-US', {weekday: 'long', month: 'short', day: 'numeric'})}`;
+  renderDayControls();
 
   todayExercises = exercises.map(ex => ({
     ...ex,
@@ -1374,8 +1396,13 @@ function updateCompleteButton() {
   const btn = document.getElementById('complete-btn');
   const done = todayExercises.filter(e => e.completed).length;
   const total = todayExercises.length;
+  if (currentDay > 28) {
+    btn.textContent = 'Program complete';
+    btn.disabled = true;
+    return;
+  }
   btn.textContent = `Complete Workout (${done}/${total})`;
-  btn.disabled = done < total;
+  btn.disabled = done < total || !!btn.dataset.busy;
 }
 
 // ============================================================
@@ -1432,7 +1459,17 @@ async function completeWorkout() {
     alert('Not connected to Firebase. Please set up your config.');
     return;
   }
-  const finished = todayExercises.every(e => e.completed);
+  // Hard guard (the button is also disabled in the UI, but that can be bypassed):
+  // a day can only be submitted once every exercise is complete.
+  if (currentDay > 28) return;
+  if (!todayExercises.every(e => e.completed)) {
+    alert('Finish all exercises for today before completing the workout.');
+    return;
+  }
+  const btn = document.getElementById('complete-btn');
+  if (btn.dataset.busy) return; // ignore double-taps while saving
+  btn.dataset.busy = '1';
+  btn.disabled = true;
   const data = {
     exercises: todayExercises.map(ex => ({
       name: ex.name,
@@ -1457,22 +1494,77 @@ async function completeWorkout() {
     }
     await workouts.doc(id).set(data);
 
-    if (finished && currentDay <= 28) {
-      currentDay += 1;
-      await settingsRef().set({ currentDay }, { merge: true });
-      alert('Workout complete! Moving on to the next day.');
-      renderWorkout(); // fresh, unchecked list for the new day
-    } else if (!finished) {
-      alert('Progress saved. Finish every exercise to advance to the next day.');
-    } else {
-      alert('Workout saved!');
-    }
+    currentDay += 1;
+    await settingsRef().set({ currentDay }, { merge: true });
+    alert(currentDay > 28
+      ? 'Program complete. Well done!'
+      : 'Workout complete! Moving on to the next day.');
+    renderWorkout(); // fresh, unchecked list for the new day
     loadHistory();
     renderWeekDots();
   } catch(e) {
     console.error('Save error:', e);
     alert('Failed to save: ' + e.message);
+  } finally {
+    delete btn.dataset.busy;
+    updateCompleteButton();
   }
+}
+
+// Go back to an earlier day and restart from there. Workouts logged for that day
+// and every later day are deleted, so progress is reset to that point.
+async function goToDay(n) {
+  if (!db || !currentUser) {
+    alert('Not connected to Firebase.');
+    return;
+  }
+  if (!Number.isInteger(n) || n < 1 || n >= currentDay) return;
+  if (!confirm(`Go back to Day ${n}?\n\nWorkouts logged for Day ${n} onward will be deleted so you can redo them. Measurements are kept.`)) return;
+
+  try {
+    const snap = await db.collection('users').doc(currentUser.uid).collection('workouts').get();
+    // Older entries have no day number: rank the fully completed ones by date (1, 2, ...),
+    // which matches how the starting day was derived for existing accounts.
+    const legacyRank = new Map();
+    snap.docs
+      .filter(d => d.data().day === undefined && d.data().totalExercises && d.data().exercisesCompleted === d.data().totalExercises)
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .forEach((d, i) => legacyRank.set(d.id, i + 1));
+    const doomed = snap.docs.filter(d => {
+      const x = d.data();
+      const dayOf = x.day !== undefined ? x.day : (legacyRank.get(d.id) ?? Infinity);
+      return dayOf >= n;
+    });
+    for (let i = 0; i < doomed.length; i += 400) {
+      const batch = db.batch();
+      doomed.slice(i, i + 400).forEach(d => batch.delete(d.ref));
+      await batch.commit();
+    }
+    currentDay = n;
+    await settingsRef().set({ currentDay }, { merge: true });
+    renderWorkout();
+    loadHistory();
+    renderWeekDots();
+  } catch (e) {
+    console.error('Go-to-day error:', e);
+    alert('Could not change day: ' + e.message);
+  }
+}
+
+function renderDayControls() {
+  const prev = document.getElementById('prev-day-btn');
+  const sel = document.getElementById('restart-day');
+  const last = Math.min(currentDay - 1, 28);
+  prev.disabled = currentDay <= 1;
+  sel.disabled = last < 1;
+  sel.innerHTML = '<option value="">Restart from day…</option>' +
+    Array.from({length: Math.max(last, 0)}, (_, i) => `<option value="${i + 1}">Day ${i + 1}</option>`).join('');
+}
+
+function onRestartDayChange(sel) {
+  const n = parseInt(sel.value, 10);
+  sel.value = '';
+  if (n) goToDay(n);
 }
 
 async function loadTodayWorkout() {
